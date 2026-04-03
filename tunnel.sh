@@ -106,6 +106,23 @@ get_script_path() {
 }
 
 # -----------------------------
+# Welcome banner
+# -----------------------------
+show_welcome() {
+        cat <<'BANNER'
+
+=========================================
+    TunnelOps — SSH Tunnel & File Manager
+    Interactive mode. Type Ctrl+C to cancel.
+    For unattended startup use: ./tunnel.sh --auto
+=========================================
+
+BANNER
+
+        info "Starting TunnelOps interactive session"
+}
+
+# -----------------------------
 # Tunnel command assembly/start
 # -----------------------------
 build_forwarding_rules() {
@@ -612,6 +629,8 @@ handle_autostart_prompt() {
 # -----------------------------
 run_interactive_mode() {
     require_tool ssh || return 1
+
+    show_welcome
 
     collect_connection_and_auth_config
     collect_operation_choice
