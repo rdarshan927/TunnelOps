@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # tunnel.sh
-# Interactive SSH tunnel manager with optional auto-start on boot.
+# Interactive SSH tunnel manager + SCP transfer utility with optional auto-start on boot.
 
 set -u
 
@@ -25,6 +25,7 @@ log() {
 
 info() { log "INFO" "$*"; }
 success() { log "SUCCESS" "$*"; }
+warn() { log "WARN" "$*"; }
 error() { log "ERROR" "$*" >&2; }
 
 # -----------------------------
@@ -80,6 +81,20 @@ prompt_non_empty() {
     done
 }
 
+prompt_yes_no() {
+    local prompt_text="$1"
+    local answer
+
+    while true; do
+        read -r -p "$prompt_text" answer
+        case "${answer,,}" in
+            y|yes) return 0 ;;
+            n|no) return 1 ;;
+            *) error "Please answer y or n." ;;
+        esac
+    done
+}
+
 get_script_path() {
     if command -v realpath >/dev/null 2>&1; then
         realpath "$0"
@@ -124,7 +139,7 @@ start_tunnel() {
 
     build_forwarding_rules forwarding
 
-    base_cmd=(ssh -N -f -o ExitOnForwardFailure=yes)
+    base_cmd=(ssh -N -f -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new)
 
     if [[ "$AUTH_METHOD" == "key" ]]; then
         if [[ ! -f "$KEY_PATH" ]]; then
@@ -152,6 +167,107 @@ start_tunnel() {
 }
 
 # -----------------------------
+# File transfer helpers
+# -----------------------------
+execute_ssh_command() {
+    local remote_cmd="$1"
+    local -a cmd
+
+    if [[ "$AUTH_METHOD" == "key" ]]; then
+        cmd=(ssh -o StrictHostKeyChecking=accept-new -i "$KEY_PATH" "${SSH_USER}@${SERVER_IP}" "$remote_cmd")
+    else
+        require_tool sshpass || return 1
+        cmd=(sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SERVER_IP}" "$remote_cmd")
+    fi
+
+    "${cmd[@]}" >> "$LOG_FILE" 2>&1
+}
+
+build_scp_command() {
+    local -n _out_cmd="$1"
+
+    _out_cmd=(scp -o StrictHostKeyChecking=accept-new)
+
+    if [[ "$AUTH_METHOD" == "key" ]]; then
+        _out_cmd+=(-i "$KEY_PATH")
+    else
+        require_tool sshpass || return 1
+        _out_cmd=(sshpass -p "$PASSWORD" "${_out_cmd[@]}")
+    fi
+
+    if [[ "$USE_RECURSIVE" == "yes" ]]; then
+        _out_cmd+=(-r)
+    fi
+
+    return 0
+}
+
+copy_files() {
+    local source_path="$LOCAL_SOURCE_PATH"
+    local remote_path="$REMOTE_DEST_PATH"
+    local remote_temp_path
+    local remote_target
+    local remote_path_escaped
+    local temp_path_escaped
+    local remote_move_cmd
+    local -a scp_cmd
+
+    require_tool scp || return 1
+
+    if [[ ! -e "$source_path" ]]; then
+        error "Local source path does not exist: $source_path"
+        return 1
+    fi
+
+    if [[ -z "$remote_path" ]]; then
+        error "Remote destination path cannot be empty."
+        return 1
+    fi
+
+    if [[ -d "$source_path" && "$USE_RECURSIVE" != "yes" ]]; then
+        error "Source is a directory. Recursive copy is required (-r)."
+        return 1
+    fi
+
+    build_scp_command scp_cmd || return 1
+
+    if [[ "$NEED_REMOTE_SUDO" == "yes" ]]; then
+        remote_temp_path="/tmp/tunnel_upload_$(date +%s)_$(basename "$source_path")"
+        temp_path_escaped="${remote_temp_path// /\\ }"
+        remote_target="${SSH_USER}@${SERVER_IP}:${temp_path_escaped}"
+
+        info "Uploading to temporary remote path: $remote_temp_path"
+        if ! "${scp_cmd[@]}" "$source_path" "$remote_target" >> "$LOG_FILE" 2>&1; then
+            error "Upload to temporary remote path failed."
+            return 1
+        fi
+
+        remote_move_cmd="sudo mkdir -p \"$(dirname "$remote_path")\" && sudo mv \"$remote_temp_path\" \"$remote_path\""
+        info "Attempting privileged move on remote host using sudo."
+        if execute_ssh_command "$remote_move_cmd"; then
+            success "File transfer completed with remote sudo move to: $remote_path"
+            return 0
+        fi
+
+        warn "Remote sudo move failed. File is currently at: $remote_temp_path"
+        warn "You may move it manually with: sudo mv '$remote_temp_path' '$remote_path'"
+        return 1
+    fi
+
+    remote_path_escaped="${remote_path// /\\ }"
+    remote_target="${SSH_USER}@${SERVER_IP}:${remote_path_escaped}"
+
+    info "Starting file transfer to $SSH_USER@$SERVER_IP:$remote_path"
+    if "${scp_cmd[@]}" "$source_path" "$remote_target" >> "$LOG_FILE" 2>&1; then
+        success "File transfer completed successfully to: $remote_path"
+        return 0
+    else
+        error "File transfer failed. Check $LOG_FILE for details."
+        return 1
+    fi
+}
+
+# -----------------------------
 # Config persistence/load
 # -----------------------------
 save_config() {
@@ -164,6 +280,7 @@ save_config() {
         printf 'SSH_USER=%q\n' "$SSH_USER"
         printf 'SERVER_IP=%q\n' "$SERVER_IP"
         printf 'AUTH_METHOD=%q\n' "$AUTH_METHOD"
+        printf 'OPERATION=%q\n' "port_forwarding"
         printf 'KEY_PATH=%q\n' "${KEY_PATH:-}"
         printf 'PASSWORD=%q\n' "${PASSWORD:-}"
         printf 'PORT_COUNT=%q\n' "$PORT_COUNT"
@@ -192,6 +309,12 @@ load_config() {
 
     if [[ -z "${SSH_USER:-}" || -z "${SERVER_IP:-}" || -z "${AUTH_METHOD:-}" || -z "${PORT_COUNT:-}" ]]; then
         error "Config file is missing required fields."
+        return 1
+    fi
+
+    OPERATION="${OPERATION:-port_forwarding}"
+    if [[ "$OPERATION" != "port_forwarding" ]]; then
+        error "Only port_forwarding is supported in --auto mode."
         return 1
     fi
 
@@ -242,6 +365,72 @@ load_config() {
 # -----------------------------
 # Cron setup for auto-start
 # -----------------------------
+detect_package_manager() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "apt"
+    elif command -v yum >/dev/null 2>&1; then
+        echo "yum"
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "pacman"
+    else
+        echo "unknown"
+    fi
+}
+
+install_cron_package() {
+    local pm
+    pm="$(detect_package_manager)"
+
+    info "Installing cron package using detected package manager: $pm"
+
+    case "$pm" in
+        apt)
+            if sudo apt-get update && sudo apt-get install -y cron; then
+                return 0
+            fi
+            ;;
+        yum)
+            if sudo yum install -y cronie; then
+                return 0
+            fi
+            ;;
+        pacman)
+            if sudo pacman -Sy --noconfirm cronie; then
+                return 0
+            fi
+            ;;
+        *)
+            error "Unsupported package manager. Please install cron/cronie manually."
+            return 1
+            ;;
+    esac
+
+    error "Automatic cron installation failed."
+    return 1
+}
+
+ensure_crontab_available_interactive() {
+    if command -v crontab >/dev/null 2>&1; then
+        return 0
+    fi
+
+    warn "crontab is not installed."
+    if prompt_yes_no "crontab is not installed. Do you want to install it? (y/n): "; then
+        if install_cron_package; then
+            if command -v crontab >/dev/null 2>&1; then
+                success "crontab is now available."
+                return 0
+            fi
+            error "Installation completed, but crontab is still not found in PATH."
+            return 1
+        fi
+        return 1
+    fi
+
+    warn "Skipping auto-start setup because crontab is unavailable."
+    return 1
+}
+
 setup_reboot_cron() {
     require_tool crontab || return 1
 
@@ -271,7 +460,7 @@ setup_reboot_cron() {
 # -----------------------------
 # Interactive input flow
 # -----------------------------
-collect_interactive_config() {
+collect_connection_and_auth_config() {
     SSH_USER="$(prompt_non_empty 'Enter SSH username: ')"
 
     while true; do
@@ -317,7 +506,32 @@ collect_interactive_config() {
                 ;;
         esac
     done
+}
 
+collect_operation_choice() {
+    while true; do
+        echo "Select operation:"
+        echo "  1) Port Forwarding"
+        echo "  2) Copy Files to Remote Server"
+        read -r -p "Choice (1 or 2): " op_choice
+
+        case "$op_choice" in
+            1)
+                OPERATION="port_forwarding"
+                return 0
+                ;;
+            2)
+                OPERATION="file_transfer"
+                return 0
+                ;;
+            *)
+                error "Invalid selection. Please choose 1 or 2."
+                ;;
+        esac
+    done
+}
+
+collect_port_forwarding_config() {
     while true; do
         read -r -p "How many ports do you want to forward? " PORT_COUNT
         if [[ "$PORT_COUNT" =~ ^[0-9]+$ ]] && ((PORT_COUNT > 0)); then
@@ -352,25 +566,45 @@ collect_interactive_config() {
     done
 }
 
-handle_autostart_prompt() {
-    local answer
+collect_file_transfer_config() {
     while true; do
-        read -r -p "Do you want the tunnel to auto-start on system boot? (y/n): " answer
-        case "${answer,,}" in
-            y|yes)
-                save_config || return 1
-                setup_reboot_cron || return 1
-                return 0
-                ;;
-            n|no)
-                info "Auto-start not enabled."
-                return 0
-                ;;
-            *)
-                error "Please answer y or n."
-                ;;
-        esac
+        LOCAL_SOURCE_PATH="$(prompt_non_empty 'Enter local file/directory path: ')"
+        if [[ -e "$LOCAL_SOURCE_PATH" ]]; then
+            break
+        fi
+        error "Local path does not exist: $LOCAL_SOURCE_PATH"
     done
+
+    REMOTE_DEST_PATH="$(prompt_non_empty 'Enter remote destination path: ')"
+
+    if prompt_yes_no "Use recursive copy (for directories)? (y/n): "; then
+        USE_RECURSIVE="yes"
+    else
+        USE_RECURSIVE="no"
+    fi
+
+    if prompt_yes_no "Are elevated permissions (sudo) required on remote destination? (y/n): "; then
+        NEED_REMOTE_SUDO="yes"
+    else
+        NEED_REMOTE_SUDO="no"
+    fi
+}
+
+handle_autostart_prompt() {
+    if prompt_yes_no "Do you want the tunnel to auto-start on system boot? (y/n): "; then
+        save_config || return 1
+
+        if ensure_crontab_available_interactive; then
+            setup_reboot_cron || return 1
+            return 0
+        fi
+
+        warn "Auto-start was not configured."
+        return 0
+    fi
+
+    info "Auto-start not enabled."
+    return 0
 }
 
 # -----------------------------
@@ -379,13 +613,27 @@ handle_autostart_prompt() {
 run_interactive_mode() {
     require_tool ssh || return 1
 
-    collect_interactive_config
+    collect_connection_and_auth_config
+    collect_operation_choice
 
-    if start_tunnel; then
-        handle_autostart_prompt || return 1
-    else
-        return 1
-    fi
+    case "$OPERATION" in
+        port_forwarding)
+            collect_port_forwarding_config
+            if start_tunnel; then
+                handle_autostart_prompt || return 1
+            else
+                return 1
+            fi
+            ;;
+        file_transfer)
+            collect_file_transfer_config
+            copy_files || return 1
+            ;;
+        *)
+            error "Unsupported operation: $OPERATION"
+            return 1
+            ;;
+    esac
 }
 
 run_auto_mode() {
@@ -403,7 +651,7 @@ run_auto_mode() {
 
 show_usage() {
     echo "Usage: $0 [--auto]"
-    echo "  --auto   Start tunnel from config.env without interactive prompts"
+    echo "  --auto   Start SSH tunnel from config.env without interactive prompts"
 }
 
 main() {
