@@ -1,136 +1,142 @@
-TunnelOps
+# TunnelOps
 
-TunnelOps is an interactive Bash utility for managing SSH port forwarding and remote file transfers. It provides an easy CLI to configure SSH connections, create background tunnels, copy files or directories to remote hosts, and optionally enable auto-start at system boot.
+Interactive SSH tunnel and file transfer manager built with Bash.
+
+**Release:** v1.0.0
+
+**License:** AGPLv3
+
+## Project Description
+
+TunnelOps is an interactive Bash utility for managing SSH port forwarding and remote file transfers. It supports:
+
+- Dynamic local port forwarding (multiple `-L` mappings)
+- File and directory transfer via `scp` with optional recursive copy
+- Optional privileged placement on the remote host (using remote `sudo`)
+- Configuration persistence and unattended auto-start (`--auto`) via a saved `config.env`
 
 ## Features
 
-- SSH authentication via password (using `sshpass`) or private key
-- Interactive configuration for connection details and operations
-- Dynamic port forwarding supporting multiple `-L` mappings
-- File transfer using `scp` with optional recursive copy
-- Optional upload with remote `sudo` move when elevated permissions are required
-- Optional startup automation using `crontab` with `@reboot`
-- Automatic detection and optional installation of cron (interactive)
-- Configuration persistence to `config.env` for `--auto` mode
-- Operation and error logging to `logs/tunnel.log`
+- Password or key-based SSH authentication (`sshpass` supported for password auth)
+- Interactive prompts for username, server IP, auth method, and operation
+- Port forwarding with multiple mappings
+- File transfer with optional recursive copy and remote sudo placement
+- Auto-start support using `crontab`/`cronie` (interactive install prompt available)
+- Logs and configuration stored in user directories following XDG conventions
 
 ## Requirements
 
 - Bash (recommended v4+)
 - OpenSSH client tools: `ssh`, `scp`
-- `sshpass` (only required for password-based authentication)
-- `crontab`/`cron` (optional, only for the auto-start feature)
-
-Note: The script checks for required tools and prompts when something is missing.
+- Optional: `sshpass` (for password-based authentication)
+- Optional: `cronie` (for cron-based auto-start)
 
 ## Installation
 
 Clone the repository and make the script executable:
 
 ```bash
-git clone https://github.com/rdarshan927/TunnelOps.git
-cd TunnelOps
+git clone https://github.com/rdarshan927/tunnelops.git
+cd tunnelops
 chmod +x tunnel.sh
 ```
 
-## Usage
+### AUR (Arch Linux)
 
-Run the script interactively:
+Install from the Arch User Repository (example using `yay`):
 
 ```bash
+yay -S tunnelops
+```
+
+Optional dependencies (install as needed):
+
+- `sshpass` — required only for password-based SSH authentication
+- `cronie` — optional, required for cron auto-start support
+
+## Usage
+
+Run interactively (installed or local):
+
+```bash
+# If installed from AUR
+tunnelops
+
+# If running from repository
 ./tunnel.sh
 ```
 
-You will be prompted for:
+Example unattended mode (auto):
 
-- SSH username and remote server IP
-- Authentication method: password or SSH key
-- Operation: Port Forwarding or File Transfer
+```bash
+./tunnel.sh --auto
+```
+
+Notes:
+
+- When installed from AUR the command `tunnelops` runs the packaged script.
+- `--auto` loads `config.env` from the user's configuration directory and starts the saved tunnels without interactive prompts.
+
+### Interactive Prompts
+
+The script will prompt for the following information when run interactively:
+
+- SSH username
+- Remote server IP address (IPv4)
+- Authentication method:
+  - Password (requires `sshpass`), or
+  - SSH private key file path
+- Operation type:
+  1) Port Forwarding — enter the number of mappings, then for each mapping enter a local port and remote port
+  2) File Transfer — provide local path, remote destination, choose recursive if copying directories, and indicate if remote sudo is required
 
 ### Port Forwarding
 
-If you choose Port Forwarding you will be asked how many ports to forward and the local/remote port pairs. The script will build an `ssh -N -f` command with all `-L` rules and run it in the background. You can optionally save the configuration and enable automatic start at boot.
-
-Example:
-
-```text
-Local 5678 -> Remote 5678
-Local 8080 -> Remote 80
-```
+- Builds and runs an `ssh -N -f` command with one or more `-L` rules
+- Runs the tunnel in the background and logs output to the user log file
 
 ### File Transfer
 
-If you choose File Transfer you will be asked for:
+- Uses `scp` for file and directory transfers
+- For password auth the script uses `sshpass` if available
+- If remote sudo is required, the script uploads to a temporary path (e.g., `/tmp/...`) and attempts a `sudo mv` on the remote host via `ssh`
 
-- Local file or directory path
-- Remote destination path
-- Whether to use recursive copy (for directories)
-- Whether the remote destination requires elevated (sudo) permissions
+## Configuration & Logs
 
-Behavior:
+- Configuration (saved by the script) is stored at:
 
-- Uses `scp` for transfers; `sshpass` is used if password authentication is selected
-- If remote sudo is required, the file is uploaded to a temporary path (e.g., `/tmp/...`) and the script attempts a `sudo mv` via `ssh` to place the file into the privileged destination. If that fails, the temporary location is reported.
-
-Example commands performed by the script (internal):
-
-- File copy: `scp file user@host:/path`
-- Directory copy: `scp -r dir user@host:/path`
-
-## Auto Mode
-
-You can save a port-forwarding configuration to `config.env` and enable an `@reboot` cron job. Then the script can be started automatically on boot with:
-
-```bash
-./tunnel.sh --auto
+```
+~/.config/tunnelops/config.env
 ```
 
-The `--auto` mode currently supports starting saved port-forwarding tunnels from `config.env`.
+- Logs are stored at:
 
-## Cron dependency and installation
+```
+~/.local/share/tunnelops/logs/tunnel.log
+```
 
-When enabling auto-start the script checks for `crontab`. If it is not present, you'll be prompted to install it. The script can detect common package managers (`apt`, `yum`, `pacman`) and will attempt to install the appropriate package (`cron` or `cronie`) if you consent. If installation is skipped or fails, auto-start setup is aborted safely.
+These paths respect the XDG environment variables `XDG_CONFIG_HOME` and `XDG_DATA_HOME` when set.
 
-## Logs
+## Cron / Auto-start
 
-Operations and errors are logged to `logs/tunnel.log`. Example entries include INFO, SUCCESS, WARN, and ERROR level lines.
+- The script can add an `@reboot` cron job to start saved tunnels at user login/reboot.
+- If `crontab`/`cron` is not found, the script offers to detect the package manager and install `cron` or `cronie` interactively (requires `sudo`).
 
-## Files
+## Links and References
 
-- `tunnel.sh` — main script
-- `config.env` — saved configuration (created when enabling auto-start)
-- `logs/tunnel.log` — operation and error log
+- GitHub repository: https://github.com/rdarshan927/tunnelops
+- AUR package page: https://aur.archlinux.org/packages/tunnelops
 
 ## Security Notes
 
-- Password-based authentication uses `sshpass` and may expose credentials in memory. Prefer SSH keys.
-- Protect private keys with proper permissions: `chmod 600 /path/to/id_rsa`.
-- Be cautious when enabling auto-start with stored passwords; consider using key-based auth instead.
-
-## License
-
-This project is licensed under the GNU Affero General Public License v3.0. See the `LICENSE` file for full terms.
+- Password-based authentication stores credentials in `config.env` only if you choose to save configuration; files are written with restrictive permissions.
+- For unattended use, prefer SSH key authentication and avoid saving plaintext passwords where possible.
+- Protect private keys with `chmod 600`.
 
 ## Contributing
 
-Contributions and issues are welcome. Please follow good security practices when suggesting changes involving credentials.
+Contributions, issues, and suggestions are welcome. When submitting changes, follow secure coding practices and avoid embedding sensitive credentials in source.
 
-## Quick Start Examples
+## License
 
-Start an interactive session:
-
-```bash
-./tunnel.sh
-```
-
-Start from saved config (auto mode):
-
-```bash
-./tunnel.sh --auto
-```
-
----
-Updated README to be clearer and better structured for quick reference.
-You are free to use, modify, and distribute this software under the terms of the license. Any modifications made and deployed over a network must also make the source code available under the same license.
-
-See the LICENSE file for full details.
+This project is distributed under the GNU Affero General Public License v3.0 (AGPLv3). See the `LICENSE` file for full terms.
