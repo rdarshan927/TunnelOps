@@ -5,9 +5,10 @@
 
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/config.env"
-LOG_DIR="$SCRIPT_DIR/logs"
+# Define user-level configuration and logging directories following XDG Base Directory spec
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tunnelops"
+LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tunnelops/logs"
+CONFIG_FILE="$CONFIG_DIR/config.env"
 LOG_FILE="$LOG_DIR/tunnel.log"
 CRON_MARKER="# tunnel_manager_auto"
 
@@ -31,9 +32,19 @@ error() { log "ERROR" "$*" >&2; }
 # -----------------------------
 # Utility checks/validators
 # -----------------------------
-ensure_log_dir() {
-    mkdir -p "$LOG_DIR"
-    touch "$LOG_FILE"
+ensure_directories() {
+    mkdir -p "$CONFIG_DIR" || {
+        error "Failed to create config directory: $CONFIG_DIR"
+        return 1
+    }
+    mkdir -p "$LOG_DIR" || {
+        error "Failed to create log directory: $LOG_DIR"
+        return 1
+    }
+    touch "$LOG_FILE" || {
+        error "Failed to create log file: $LOG_FILE"
+        return 1
+    }
 }
 
 require_tool() {
@@ -674,7 +685,7 @@ show_usage() {
 }
 
 main() {
-    ensure_log_dir
+    ensure_directories || exit 1
 
     case "${1:-}" in
         --auto)
